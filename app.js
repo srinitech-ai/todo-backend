@@ -4,7 +4,7 @@ import bodyParser from "body-parser";
 import { v4 as uuidv4 } from "uuid";
 
 const app = express();
-const PORT = process.env.PORT || 3001;
+const PORT = process.env.PORT || 3000;
 
 // Allow frontend calls
 app.use(cors({ origin: process.env.FRONTEND_ORIGIN || "*" }));
