@@ -1,110 +1,36 @@
-name: CI → Deploy to EC2
+name: Backend CI/CD - AWS EC2 Deploy
 
 on:
   push:
     branches: [ main ]
 
-permissions:
-  contents: read
-
 jobs:
-  build-and-deploy:
+  deploy:
     runs-on: ubuntu-latest
 
     steps:
-      # 1️⃣ Checkout repository
-      - name: Checkout repo
+      - name: Checkout code
         uses: actions/checkout@v4
 
-      # 2️⃣ Setup Node.js
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '20.19.0'
+          node-version: '18'
 
-      # 3️⃣ Install dependencies
-      - name: Install dependencies
-        run: npm ci
-
-      # 4️⃣ (Optional) Build step – uncomment if you have a build
-      # - name: Build app
-      #   run: npm run build
-
-      # 5️⃣ Archive the repository for deploy
-      - name: Archive repo for deploy
+      - name: Install dependencies & test build
         run: |
-          zip -r release.zip . \
-            -x "node_modules/***" ".git/***" ".github/***" "dist/***" "README.md"
+          npm ci
+          npm run build --if-present
 
-      # 6️⃣ Prepare SSH key safely
-      - name: Prepare private key
-        run: |
-          printf '%s\n' "$SSH_PRIVATE_KEY" > ./deploy_key
-          chmod 600 ./deploy_key
-        env:
-          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
-
-      # 7️⃣ Upload the release archive to EC2 (user’s home directory)
-      - name: Upload release to server via SCP
-        run: |
-          # safe port handling: use secret if present, otherwise default to 22
-          PORT="${{ secrets.SSH_PORT }}"
-          # trim whitespace/newlines (bash)
-          PORT="$(echo "$PORT" | tr -d '[:space:]')"
-          if [ -z "$PORT" ]; then PORT=22; fi
-
-          # debug (optional) uncomment to print resolved port in Actions logs
-          # echo "Using SSH port: $PORT"
-
-          # create the deploy key file (defensive re-check, uses secret)
-          printf '%s\n' "$SSH_PRIVATE_KEY" > ./deploy_key
-          chmod 600 ./deploy_key
-
-          # run scp with quoted variables
-          scp -o StrictHostKeyChecking=no -i ./deploy_key -P "$PORT" release.zip ec2-user@${{ secrets.EC2_HOST }}:~/release.zip
-        env:
-          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
-
-      # 8️⃣ Deploy on the remote EC2 instance
-      - name: Deploy on remote EC2 (unzip, rsync, npm install, restart service)
-        uses: appleboy/ssh-action@v0.1.8
+      - name: Deploy to EC2 via SSH
+        uses: appleboy/ssh-action@v1.2.0
         with:
-          host: ${{ secrets.EC2_HOST }}
-          username: ec2-user
-          key: ${{ secrets.SSH_PRIVATE_KEY }}
-          port: ${{ secrets.SSH_PORT }}
+          host: ${{ secrets.AWS_SSH_HOST }}
+          username: ${{ secrets.AWS_SSH_USERNAME }}
+          key: ${{ secrets.AWS_SSH_KEY }}
           script: |
-            set -e
-            echo "---- [1] Prepare target dir ----"
-            mkdir -p ${{ secrets.EC2_TARGET_DIR }}
-
-            echo "---- [2] Clean old temp folder ----"
-            rm -rf /tmp/release || true
-
-            echo "---- [3] Extract release ----"
-            unzip -o ~/release.zip -d /tmp/release
-
-            echo "---- [4] Remove old node_modules ----"
-            sudo rm -rf ${{ secrets.EC2_TARGET_DIR }}/node_modules || true
-
-            echo "---- [5] Rsync files as root, chown to deploy:deploy ----"
-            sudo rsync -av --delete \
-              --chown=deploy:deploy \
-              --chmod=Dg+rx,Du+rwx,Fu+rw,Fg+r \
-              /tmp/release/ ${{ secrets.EC2_TARGET_DIR }}/
-
-            echo "---- [6] Fix permissions ----"
-            sudo chown -R deploy:deploy ${{ secrets.EC2_TARGET_DIR }}
-            sudo find ${{ secrets.EC2_TARGET_DIR }} -type d -exec chmod 755 {} \; || true
-            sudo find ${{ secrets.EC2_TARGET_DIR }} -type f -exec chmod 644 {} \; || true
-
-            echo "---- [7] Install production dependencies as deploy ----"
-            sudo -u deploy -H bash -lc "cd ${{ secrets.EC2_TARGET_DIR }} && npm ci --omit=dev --no-audit --no-fund"
-
-            echo "---- [8] Restart Node.js service ----"
-            sudo systemctl daemon-reload || true
-            sudo systemctl restart my-node-app.service
-            sudo systemctl status my-node-app.service --no-pager
-
-            echo "✅ Deployment complete!"
-
+            cd /home/ec2-user/todo-backend
+            git pull origin main
+            npm ci --production
+            pm2 reload todo-backend || pm2 start app.js --name todo-backend --update-env
+            pm2 save
